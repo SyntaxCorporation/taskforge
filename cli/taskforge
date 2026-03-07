@@ -1,0 +1,614 @@
+#!/usr/bin/env python3
+
+# Add
+# List
+# Delete
+# Edit
+# Done
+# Undone
+# Find
+# Info
+# Clear
+# Sync
+# Export
+# Import
+
+import csv
+import json
+import sqlite3
+import argparse
+import requests
+from sys import exit
+from pathlib import Path
+from random import randint
+from datetime import datetime
+from colorama import init, Fore, Back, Style
+from rich import traceback
+
+traceback.install()
+init(autoreset=True)
+task_file = Path.home() / ".taskforge"
+ctime = int(datetime.now().timestamp())
+
+def date_validation(arg):
+	try:
+		return datetime.strptime(arg, "%Y-%m-%d").date()
+	except ValueError:
+		print(Fore.WHITE + Back.RED + f" Not a valid date format: '{arg}'" + Style.RESET_ALL + "\n Expected format: YYYY-MM-DD")
+		exit(1)
+
+pre_parser = argparse.ArgumentParser(add_help=False)
+pre_parser.add_argument("-V", "--version", action="store_true")
+
+args, _ = pre_parser.parse_known_args()
+
+if args.version:
+	print(f"""
+{Fore.RED + Style.BRIGHT + "Taskforge" + Style.RESET_ALL} - Version: {Fore.CYAN + Style.BRIGHT + "1.5.1" + Style.RESET_ALL}
+Copyright (C) 2026 by {Style.BRIGHT + "Syntax Corporation"}
+	""")
+	exit(0)
+
+conn = sqlite3.connect(task_file)
+cursor = conn.cursor()
+
+cursor.execute("""
+	CREATE TABLE IF NOT EXISTS tasks (
+		id INTEGER PRIMARY KEY,
+		title TEXT,
+		tags TEXT,
+		due DATE,
+		note TEXT,
+		status BOOLEAN,
+		timestamp INTEGER
+	)
+""")
+
+def close(a):
+	conn.commit()
+	conn.close()
+	exit(a)			 
+
+parser = argparse.ArgumentParser(prog="taskforge")
+parser.add_argument("-V", "--version", action="store_true",help="Shows the current version of the Program")
+subparsers = parser.add_subparsers(dest="command", required=True)
+
+add = subparsers.add_parser("add", aliases=["a"], help="Add a Task to do")
+add.add_argument("title", type=str, help="Title of Tasks")
+add.add_argument("--tags", type=str, nargs="+", help="Add Tags to the Task")
+add.add_argument("--note", type=str, help="Add a Note to the Task")
+add.add_argument("--due", type=date_validation, help="Add a Due Date to the Task")
+
+t_list = subparsers.add_parser("list", aliases=["ls"], help="List all tasks")
+t_list.add_argument("--all", action="store_true", help="Shows the list of all Tasks")
+t_list.add_argument("--pending", action="store_true", help="Shows the list of only Pending Tasks")
+t_list.add_argument("--done", action="store_true", help="Shows the list of Tasks that are Done")
+t_list.add_argument("--tags", type=str, nargs="+", help="Shows the list of Tasks which contains given Tags")
+t_list.add_argument("--due", type=date_validation, help="Shows the list of Tasks that are Due on a Particular Date")
+t_list.add_argument("--due-before", type=date_validation, help="Shows the list of Tasks that are Due before a Particular Date")
+t_list.add_argument("--due-after", type=date_validation,	help="Shows the list of Tasks that are Due after a Particular Date")
+t_list.add_argument("--limit", type=int, help="Only shows first Nth Tasks")
+t_list.add_argument("--sort", type=str, nargs="+", help="Sorts the Tasks on the basis of Tasks Details")
+t_list.add_argument("--reverse", action="store_true", help="Used with '--sort' and reverse sort the Tasks")
+t_list.add_argument("--verbose", action="store_true", help="Shows the list of Tasks with their all Details")
+
+delete = subparsers.add_parser("delete", aliases=["del"], help="Delete tasks")
+delete.add_argument("ids", type=int, nargs="+", help="Delete Tasks using Ids")
+
+edit = subparsers.add_parser("edit", aliases=["e"], help="Edit a task")
+edit.add_argument("ids", type=int, nargs="+", help="Edit Tasks using Ids")
+edit.add_argument("--title", type=str, help="Edit title")
+edit.add_argument("--tags", type=str, nargs="+", help="Edit flags")
+edit.add_argument("--due", type=date_validation, help="Edit due date")
+edit.add_argument("--note", type=str, help="Edit the note of a Task")
+
+done = subparsers.add_parser("done", aliases=["d"], help="Mark a task as done")
+done.add_argument("ids", type=int, nargs="+", help="Done Tasks using Ids")
+
+undone = subparsers.add_parser("undone", aliases=["u"], help="Mark a task as undone")
+undone.add_argument("ids", type=int, nargs="+", help="Undone Tasks using Ids")
+
+find = subparsers.add_parser("find", aliases=["f"], help="Finds Tasks using Title, Tags, etc.")
+find.add_argument("--tags", type=str, nargs="+", help="Find Tasks using Tags")
+find.add_argument("--title", type=str, help="Find Tasks using Title")
+find_group = find.add_mutually_exclusive_group()
+find_group.add_argument("--due-before", type=date_validation, help="Find Tasks that are due before a Particular date")
+find_group.add_argument("--due-after", type=date_validation, help="Find Tasks that are due after a Particular data")
+
+info = subparsers.add_parser("info", aliases=["i"], help="View full details of a task")
+info.add_argument("ids", type=int, nargs="+", help="Shows the Complete Information of Tasks using Ids")
+
+clear = subparsers.add_parser("clear", help="Delete All Tasks (Dangerous)")
+clear.add_argument("--confirm", action="store_true", help="Confirms the action")
+
+sync = subparsers.add_parser("sync", help="Sync local task with server")
+sync_group = sync.add_mutually_exclusive_group(required=True)
+sync_group.add_argument("--pull", action="store_true", help="Fetch Tasks from Server")
+sync_group.add_argument("--push", action="store_true", help="Push Tasks to Server")
+sync_group.add_argument("--match", action="store_true", help="Matched the Server and Local Tasks using Fetch and Push")
+sync.add_argument("--port", type=int, help="Connect with Server with a specific port")
+sync.add_argument("--host", type=str, help="Address of Server(host)")
+
+export_t = subparsers.add_parser("export", help="Export tasks to file")
+export_t.add_argument("--format", type=str, required=True, help="Expors Tasks to a (json, csv) file")
+export_t.add_argument("--file", type=str, help="Path where to export Tasks")
+
+import_t = subparsers.add_parser("import", help="Import tasks from file")
+import_t.add_argument("--format", type=str, required=True, help="Import Tasks from a (json, csv) file [Optional]")
+import_t.add_argument("--file", type=str, required=True, help="Import Tasks from a file on a Path")
+
+args = parser.parse_args()
+
+if args.command in ["add", "a"]:
+	data = [
+		randint(1000, 9999), #ID
+		args.title, #Title
+		json.dumps(args.tags) if args.tags is not None else "-", #Tags
+		str(args.due) if args.due is not None else "-", #Due
+		args.note if args.note is not None else "-", #Note
+		False, #Status
+		ctime #TimeStamp
+	]
+
+	cursor.execute(f"INSERT INTO tasks (id, title, tags, due, note, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)", tuple(data))
+	
+	print(Fore.GREEN + Style.BRIGHT + f" ✓ Task added successfully...")
+	print(f" Task ID: " + Fore.CYAN + Style.BRIGHT + str(data[0]))
+	close(0)
+
+
+if args.command in ["list", "ls"]:
+	fields = ["id", "title", "status"]
+	clauses = []
+	placeholder = []
+	values = []
+	if args.done:
+		placeholder.append("status = ?")
+		values.append(True)
+	if args.pending:
+		placeholder.append("status = ?")
+		values.append(False)
+	if args.tags is not None:
+		fields.append("tags")
+		tag_placeholder = [f"""(
+			EXISTS (
+				SELECT 1 FROM json_each(tasks.tags)
+				WHERE value = ?
+			)
+		)""" for tag in args.tags]
+		placeholder.append(f"(json_valid(tags) AND ({' AND '.join(tag_placeholder)}))")
+		values.extend(args.tags)
+	if args.due is not None:
+		fields.append("due")
+		placeholder.append("due != '-' AND due = ?")
+		values.append(str(args.due))
+	if args.due_before is not None:
+		fields.append("due")
+		placeholder.append("due != '-' AND due < ?")
+		values.append(str(args.due_before))
+	if args.due_after is not None:
+		fields.append("due")
+		placeholder.append("due != '-' AND due > ?")
+		values.append(str(args.due_after))
+	if args.all or len(values) == 0:
+		fields.extend(["tags", "due"])
+	if args.sort is not None:
+		clauses.append("ORDER BY")
+		if args.reverse:
+			sort_query = [f"{col} DESC" for col in args.sort]
+			clauses.append(",".join(sort_query))
+		else:
+			sort_query = [f"{col} ASC" for col in args.sort]
+			clauses.append(",".join(sort_query))
+	if args.limit is not None:
+		if args.limit:
+			clauses.append(f"LIMIT {args.limit} ")
+		else:
+			print(Fore.RED + Style.BRIGHT + " Please enter a valid limit...")
+			close(1)
+	if args.verbose:
+		fields = ["id", "title", "status", "tags", "due", "note"]
+		
+	
+	raw_data = cursor.execute(f"""
+		SELECT 
+		{",".join(fields)}
+		FROM tasks
+		{ " ".join(clauses) if len(clauses) > 0 else ""}
+		{ "WHERE" if len(placeholder) > 0 else ""}
+		{" AND ".join(placeholder)}
+		""",
+		tuple(values)
+	).fetchall()
+
+	
+	if len(raw_data) > 0:
+		print(f" List of Tasks\n")
+		if args.verbose:
+			for data in raw_data:
+				print(f"[{Style.BRIGHT + Fore.RED + "X" + Fore.RESET + Style.RESET_ALL if data[2] else " "}]  {Fore.MAGENTA + Style.BRIGHT + Style.BRIGHT  + data[1] + Fore.RESET + Style.RESET_ALL}")
+				print(f"     Id: {Fore.CYAN + Style.BRIGHT + str(data[0]) + Fore.RESET + Style.RESET_ALL} | Due: {Fore.CYAN + Style.BRIGHT + data[4] + Fore.RESET + Style.RESET_ALL} | Tags: {json.loads(data[3]) if data[3] != "-" else "-"}")
+				print(f"     {data[5]}\n\n")
+		else:
+			for data in raw_data:
+				print(f"[{Fore.RED + Style.BRIGHT + Style.BRIGHT + "X" + Fore.RESET + Style.RESET_ALL if data[2] else " "}]  {Fore.MAGENTA + Style.BRIGHT + Style.BRIGHT + data[1] + Fore.RESET + Style.RESET_ALL}")
+				print(f"     Id: {Fore.CYAN + Style.BRIGHT + str(data[0]) + Fore.RESET + Style.RESET_ALL}", end="")
+				print("" if len(data) == 3 else " | ", end="")
+				print(f"Due: {Fore.CYAN + Style.BRIGHT + data[fields.index("due")] + Fore.RESET + Style.RESET_ALL}" if "due" in fields else "", end="")
+				print("\n     " if len(data) > 4 else "", end="")
+				print(f"Tags: {json.loads(data[fields.index("tags")])}" if "tags" in fields and data[fields.index("tags")] != "-" else "", end="")
+				print("\n")
+		
+	else:
+		print(Fore.WHITE + Back.RED + " No task found...\n" + Style.RESET_ALL)
+
+	close(0)
+
+
+if args.command in ["delete", "del"]:
+	placeholder = ",".join(["?"] * len(args.ids))
+	cursor.execute(f"DELETE FROM tasks WHERE id IN ({placeholder})", tuple(args.ids))
+	if cursor.rowcount == 0:
+		print(Fore.WHITE + Back.RED + f" No task found with id: {Fore.CYAN + Style.BRIGHT + str(args.ids)}\n" + Style.RESET_ALL)
+	else:
+		print(Fore.GREEN + Style.BRIGHT + " ✓ Task Deleted Successfully...\n")
+
+	close(0)
+
+
+if args.command in ["edit", "e"]:
+	placeholder = ["timestamp = ?"]
+	values = [ctime]
+	if args.title is not None: 
+		if args.title != "":
+			placeholder.append(f"title = ?")
+			values.append(args.title)
+		else:
+			print(Fore.RED + Style.BRIGHT + " Please enter title...\n")
+			close(1)
+	if args.tags is not None:
+		placeholder.append(f"tags = ?")
+		values.append(json.dumps(args.tags))
+	if args.due is not None:
+		placeholder.append(f"due = ?")
+		values.append(str(args.due))
+	if args.note is not None: 
+		if args.note != "":
+			placeholder.append(f"note = ?")
+			values.append(args.note)
+		else:
+			print(Fore.RED + Style.BRIGHT + " Please enter a note...\n")
+			close(1)
+	id_placeholder = ",".join(["?"] * len(args.ids))
+	values.extend(args.ids)
+	
+	cursor.execute(f"UPDATE tasks SET {",".join(placeholder)} WHERE id IN ({id_placeholder})", tuple(values))
+	if cursor.rowcount == 0:
+		print(Fore.WHITE + Back.RED + f" No task found with id: {Fore.CYAN + Style.BRIGHT + str(args.ids)}\n" + Style.RESET_ALL)
+	else:
+		print(Fore.GREEN + Style.BRIGHT + " ✓ Task edited successfully...\n")
+	
+	close(0)
+
+
+if args.command in ["done", "d"]:
+	placeholder = ",".join(["?"] * len(args.ids))
+	cursor.execute(f"UPDATE tasks SET status = True, timestamp = {ctime} WHERE id IN ({placeholder})", tuple(args.ids))
+	if cursor.rowcount == 0:
+		print(Fore.WHITE + Back.RED + f" No task found with id: {Fore.CYAN + Style.BRIGHT + str(args.ids)}\n" + Style.RESET_ALL)
+	else:
+		print(Fore.GREEN + Style.BRIGHT + " ✓ Task done...\n")
+	
+	close(0)
+
+if args.command in ["undone", "u"]:
+	placeholder = ",".join(["?"] * len(args.ids))
+	cursor.execute(f"UPDATE tasks SET status = False, timestamp = {ctime} WHERE id IN ({placeholder})", tuple(args.ids))
+	if cursor.rowcount == 0:
+		print(Fore.WHITE + Back.RED + f" No task found with id: {Fore.CYAN + Style.BRIGHT + str(args.ids)}\n" + Style.RESET_ALL)
+	else:
+		print(Fore.GREEN + Style.BRIGHT + " ✓ Task marked as undone...\n")
+	
+	close(0)
+
+
+if args.command in ["find", "f"]:
+	placeholder = []
+	values = []
+	if args.title is not None:
+		if args.title != "":
+			placeholder.append(f"title LIKE ?")
+			values.append(f"%{args.title}%")
+		else:
+			print(Fore.RED + Style.BRIGHT + " Please enter the title...\n")
+			close(1)
+	if args.tags is not None:
+		tag_placeholder = [f"""(
+			EXISTS (
+				SELECT 1 FROM json_each(tasks.tags)
+				WHERE value = ?
+			)
+		)""" for tag in args.tags]
+		placeholder.append(f"(json_valid(tags) AND ({' OR '.join(tag_placeholder)}))")
+		values.extend(args.tags)
+	if args.due_before is not None:
+		placeholder.append(f"due != '-' AND due < ?")
+		values.append(str(args.due_before))
+	if args.due_after is not None:
+		placeholder.append(f"due != '-' AND due > ?")
+		values.append(str(args.due_after))
+	
+	raw_data = cursor.execute(f"SELECT * FROM tasks WHERE {" OR ".join(placeholder)}", tuple(values)).fetchall()
+	if len(raw_data) > 0:
+		print(f" {Fore.CYAN + Style.BRIGHT + str(len(raw_data)) + Fore.RESET + Style.RESET_ALL} Results Found:\n")
+		for data in raw_data:
+			print(f"[{Fore.RED + Style.BRIGHT + "X" + Fore.RESET + Style.RESET_ALL if data[5] else " "}]  {Fore.MAGENTA + Style.BRIGHT + Style.BRIGHT + data[1] + Fore.RESET}\n     Id: {Fore.CYAN + Style.BRIGHT + str(data[0]) + Fore.RESET + Style.RESET_ALL} | Due: {Fore.CYAN + Style.BRIGHT + data[3] + Fore.RESET + Style.RESET_ALL} | Tags: {json.loads(data[2]) if data[2] != "-" else "-"}\n")
+	else:
+		print(Fore.WHITE + Back.RED + " No result found...\n" + Style.RESET_ALL)
+	
+	close(0)
+
+
+if args.command in ["info", "i"]:
+	placeholder = ",".join(["?"] * len(args.ids))
+	not_found = []
+	data = cursor.execute(f"SELECT * FROM tasks WHERE id IN ({placeholder})", tuple(args.ids)).fetchall()
+	if len(data) > 0:
+		print(" Task Details...")
+		for row in data:
+			print(f'''
+Id:       {Fore.CYAN + Style.BRIGHT + str(row[0]) + Fore.RESET + Style.RESET_ALL}
+Title:    {Fore.MAGENTA + Style.BRIGHT + Style.BRIGHT + row[1] + Fore.RESET + Style.RESET_ALL}
+Tags:     {json.loads(row[2]) if row[2] != "-" else "-"}
+Due:      {Fore.CYAN + Style.BRIGHT + row[3] + Fore.RESET + Style.RESET_ALL}
+Note:     {row[4]}
+Status:   {Fore.GREEN + "Done" + Fore.RESET if row[5] else Fore.RED + Style.BRIGHT + "Pending" + Fore.RESET + Style.RESET_ALL}
+''')
+			args.ids.remove(row[0])
+		if len(args.ids):
+			print(Fore.WHITE + Back.RED + f" Few Tasks Are Not Exists: {Fore.CYAN + Style.BRIGHT + str(args.ids)}" + Style.RESET_ALL)
+
+	else:
+		print(Fore.WHITE + Back.RED + f" No task found with id: {Fore.CYAN + Style.BRIGHT + str(args.ids)}\n" + Style.RESET_ALL)
+	
+	close(0)
+
+
+if args.command == "clear":
+	if args.confirm:
+		cursor.execute("DELETE FROM tasks")
+		print(Fore.GREEN + Style.BRIGHT + " ✓ All tasks cleared...")
+	else:
+		print(Fore.MAGENTA + Style.BRIGHT + " Are You Sure...")
+		print(Fore.MAGENTA + Style.BRIGHT + " Use '--confirm' option to ensure this action")
+	
+	close(0)
+
+
+if args.command == "sync":
+	port = args.port if args.port is not None else 8000
+	host = args.host if args.host is not None else "http://127.0.0.1"
+	def req(task):
+		raw_data = cursor.execute("SELECT id, timestamp FROM tasks").fetchall()
+		try:
+			if len(raw_data) == 0:
+				local_data = {}
+			else:
+				local_data = {row[0]: row[1] for row in raw_data}
+			init_raw_res = requests.post(f"{host}:{port}/", json={"data": local_data, "task": task, "phase": 1}, timeout=5)
+			return init_raw_res, init_raw_res.status_code
+		except requests.exceptions.RequestException:
+			print(Fore.WHITE + Back.RED + " Server is not reachable..." + Style.RESET_ALL)
+			print(" Try with different port or restart the server...\n")
+			close(1)
+
+	if args.pull:
+		var, status = req("pull")
+		res = var.json()
+		if status == 200 and res["opr"] == 0:
+			if len(res["data"]) > 0:
+				data = [tuple(d) for d in res["data"]]
+				cursor.executemany(f"""
+					INSERT INTO tasks (
+					id,
+					title,
+					tags, 
+					due,
+					note,
+					status,
+					timestamp
+					) VALUES (
+					?, ?, ?, ?, ?, ?, ?
+					) ON CONFLICT(id)
+					DO UPDATE SET
+					title = excluded.title,
+					tags = excluded.tags,
+					due = excluded.due,
+					note = excluded.note,
+					status = excluded.status,
+					timestamp = excluded.timestamp
+				""", data)
+				if cursor.rowcount == 0:
+					print(Fore.WHITE + Back.RED + " Unable to store tasks in database...\n" + Style.RESET_ALL)
+					close(1)
+				else:
+					print(Fore.GREEN + Style.BRIGHT + " ✓ Successfully stored fetched tasks into database...\n")
+					close(0)
+			else:
+				print(Fore.MAGENTA + Style.BRIGHT + " Tasks are already synced with Server...\n")
+		else:
+			print(Fore.WHITE + Back.RED + f" Server responsed with status_code: {Fore.CYAN + Style.BRIGHT + str(status)}" + Style.RESET_ALL)
+		
+	if args.push:
+		var, status = req("push")
+		init_res = var.json()
+		if status == 200 and init_res["opr"] == 0:
+			ids = init_res["data"]
+			if len(ids) > 0:
+				placeholder = ",".join(["?"] * len(ids))
+				final_data = cursor.execute(f"SELECT * FROM tasks WHERE id IN ({placeholder})", tuple(ids)).fetchall()
+				data = [list(d) for d in final_data]
+			else:
+				print(Fore.MAGENTA + Style.BRIGHT + " Tasks are already synced with Server...\n")
+				close(0)
+				
+			final_raw_res = requests.post(f"{host}:{port}/", json={"data": data, "phase": 2, "task": "push"})
+			final_res = final_raw_res.json()
+			if final_raw_res.status_code == 200 and final_res["opr"] == 0:
+				print(Fore.GREEN + Style.BRIGHT + " ✓ Successfully synced tasks with Server...\n")
+				close(0)
+			else:
+				print(Fore.WHITE + Back.RED + " Something went wrong on Server side in Phase 2\n" + Style.RESET_ALL)
+				close(1)
+		else:
+			print(Fore.WHITE + Back.RED + " Something went wrong on Server side in Phase 1\n" + Style.RESET_ALL)
+			close(1)
+		
+	if args.match:
+		var, status = req("match")
+		init_res = var.json()
+		if status == 200 and init_res["opr"] == 0:
+			server_ids = tuple(init_res["ids"])
+			raw_server_data = init_res["data"]
+			if len(server_ids) == 0 and len(raw_server_data) == 0:
+				print(Fore.MAGENTA + Style.BRIGHT + " Tasks are already synced with Server...\n")
+			else:
+				if len(raw_server_data) > 0:
+					server_data = [tuple(d) for d in raw_server_data]
+					cursor.executemany(f"""
+						INSERT INTO tasks (
+						id,
+						title,
+						tags, 
+						due,
+						note,
+						status,
+						timestamp
+						) VALUES (
+						?, ?, ?, ?, ?, ?, ?
+						) ON CONFLICT(id)
+						DO UPDATE SET
+						title = excluded.title,
+						tags = excluded.tags,
+						due = excluded.due,
+						note = excluded.note,
+						status = excluded.status,
+						timestamp = excluded.timestamp
+					""", server_data)
+					if cursor.rowcount == 0:
+						print(Fore.WHITE + Back.RED + " Unable to store tasks into database...\n" + Style.RESET_ALL)
+						close(1)
+					else:
+						print(Fore.GREEN + Style.BRIGHT + " ✓ Successfully stored fetched tasks in database...")
+				
+				if len(server_ids) > 0:
+					placeholder = ",".join(["?"] * len(server_ids))
+					final_data = cursor.execute(f"SELECT * FROM tasks WHERE id IN ({placeholder})", server_ids).fetchall()
+					data = [list(d) for d in final_data]
+					
+					final_raw_res = requests.post(f"{host}:{port}/", json={"data": data, "phase": 2, "task": "match"})
+					final_res = final_raw_res.json()
+					if final_raw_res.status_code == 200 and final_res["opr"] == 0:
+						print(Fore.GREEN + Style.BRIGHT + " ✓ Successfully synced tasks with Server...\n")
+						close(0)
+					else:
+						print(Fore.WHITE + Back.RED + " Something wend wrong on Server side in Phase 2\n" + Style.RESET_ALL)
+						close(1)
+		
+		else:
+			print(Fore.WHITE + Back.RED + " Something went wrong on Server side in Phase 1\n" + Style.RESET_ALL)
+			close(1)
+		
+
+if args.command == "export":
+	if args.format.lower() == "json":
+		raw_data = cursor.execute("SELECT * FROM tasks").fetchall()
+		
+		final_data = []
+		for data in raw_data:
+			data_dict = {
+				"id": data[0],
+				"title": data[1],
+				"tags": json.loads(data[2]) if data[2] != "-" else "-",
+				"due": data[3],
+				"note": data[4],
+				"status": True if data[5] else False,
+				"timestamp": data[6]
+			}
+			
+			final_data.append(data_dict)
+		
+		exp_file = Path(args.file).resolve() if args.file is not None else Path.cwd() / "taskforge_export_file.json"
+		
+		with open(exp_file, "w") as file:
+			json.dump(final_data, file, indent=2)
+		
+		if cursor.rowcount == 0:
+			print(Fore.WHITE + Back.RED + " An Error Occured while Exporting...\n" + Style.RESET_ALL)
+		else:
+			print(Fore.GREEN + Style.BRIGHT + " ✓ Export Successful...")
+		close(0)
+	
+	elif args.format.lower() == "csv":
+		data = cursor.execute("SELECT * FROM tasks").fetchall()
+		
+		exp_file = Path(args.file).resolve() if args.file is not None else Path.cwd() / "taskforge_export_file.csv"
+	
+		with open(exp_file, mode='w', newline='') as file:
+			writer = csv.writer(file)
+			writer.writerow(["Id", "Title", "Tags", "Due", "Note", "Status", "TimeStamp"])
+			for row in data:
+				writer.writerow(row)
+
+		if cursor.rowcount == 0:
+			print(Fore.WHITE + Back.RED + " An Error Occured while Exporting...\n" + Style.RESET_ALL)
+		else:
+			print(Fore.GREEN + Style.BRIGHT + " ✓ Export Successful...")
+		close(0)
+
+	else:
+		print(Fore.WHITE + Back.RED + " Unsupported Format..." + Style.RESET_ALL)
+		print(Fore.MAGENTA + Style.BRIGHT + " Can only export to: JSON and CSV")
+
+
+if args.command == "import":
+	if args.format.lower() == "json":
+		file_path = Path(args.file).resolve()
+		with open(file_path, "r") as file:
+			data = json.load(file)
+			tupled_data = []
+			for row in data:
+				row["tags"] = json.dumps(row["tags"]) if row["tags"] != "-" else "-"
+				tupled_data.append(tuple(row.values()))
+			
+			cursor.executemany(f"INSERT OR IGNORE INTO tasks (id, title, tags, due, note, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)", tupled_data)
+
+		if cursor.rowcount == 0:
+			print(Fore.MAGENTA + Style.BRIGHT + " Already have these Tasks...")
+		else:
+			print(Fore.GREEN + Style.BRIGHT + " ✓ Import Successful...")
+		close(0)
+	
+	elif args.format.lower() == "csv":
+		file_path = Path(args.file).resolve()
+		with open(file_path, "r") as file:
+			reader = csv.reader(file)
+			next(reader)
+			data = []
+			for row in reader:
+				row[0] = int(row[0])
+				row[5] = True if int(row[5]) else False
+				data.append(tuple(row))
+			
+			cursor.executemany(f"INSERT OR IGNORE INTO tasks (id, title, tags, due, note, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)", data)
+
+		if cursor.rowcount == 0:
+			print(Fore.MAGENTA + Style.BRIGHT + " Already have these tasks...")
+		else:
+			print(Fore.GREEN + Style.BRIGHT + " ✓ Import Successful...")
+		close(0)
+	
+	else:
+		print(Fore.WHITE + Back.RED + " Unsupported Format...")
+		print(Fore.MAGENTA + Style.BRIGHT + " Can only import from: JSON and CSV file\n")
+		close(1)
