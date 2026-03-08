@@ -1,4 +1,6 @@
 backend/*
 !backend/server.py
+!backend/requirements.txt
 cli/*
 !cli/taskforge
+!cli/requirements.txt
